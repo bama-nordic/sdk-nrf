@@ -56,6 +56,8 @@ int rpu_clks_on(void);
 int rpu_enable(void);
 int rpu_disable(void);
 
+int rpu_validate_addr(uint32_t start_addr, uint32_t len, bool *hl_flag);
+
 #if defined(CONFIG_BOARD_NRF7002DK_NRF7001_NRF5340_CPUAPP) || \
 	defined(CONFIG_BOARD_NRF7002DK_NRF5340_CPUAPP)
 int ble_ant_switch(unsigned int ant_switch);
