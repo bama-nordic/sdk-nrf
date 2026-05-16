@@ -21,6 +21,8 @@
 #include <zephyr/posix/sys/socket.h>
 #include <zephyr/shell/shell.h>
 
+#include <hw_id.h>
+
 #include "net_sample_common.h"
 
 LOG_MODULE_REGISTER(arp_mqtt, CONFIG_LOG_DEFAULT_LEVEL);
@@ -38,7 +40,34 @@ static struct pollfd fds[1];
 static int nfds;
 static volatile bool mqtt_got_connack;
 
+/* "nrf_" + 4 hex digits + NUL */
+static char mqtt_client_id[9];
+
 static K_MUTEX_DEFINE(mqtt_lock);
+
+static int mqtt_client_id_set(void)
+{
+	char hw[HW_ID_LEN];
+	int ret;
+
+	ret = hw_id_get(hw, sizeof(hw));
+	if (ret != 0) {
+		LOG_ERR("hw_id_get failed: %d", ret);
+		return ret;
+	}
+
+	if (strlen(hw) < 12) {
+		LOG_ERR("Unexpected HW ID length");
+		return -EINVAL;
+	}
+
+	ret = snprintk(mqtt_client_id, sizeof(mqtt_client_id), "nrf_%s", &hw[8]);
+	if (ret < 0 || ret >= (int)sizeof(mqtt_client_id)) {
+		return -ENOSPC;
+	}
+
+	return 0;
+}
 
 static void broker_addr_str(char *buf, size_t len)
 {
@@ -270,10 +299,17 @@ static void client_init(struct mqtt_client *client)
 {
 	mqtt_client_init(client);
 
+	if (mqtt_client_id_set() != 0) {
+		(void)strncpy(mqtt_client_id, "nrf_0000", sizeof(mqtt_client_id));
+		mqtt_client_id[sizeof(mqtt_client_id) - 1] = '\0';
+	}
+
+	LOG_INF("MQTT client ID %s", mqtt_client_id);
+
 	client->broker = &broker;
 	client->evt_cb = mqtt_evt_handler;
-	client->client_id.utf8 = (uint8_t *)CONFIG_ARP_MQTT_CLIENT_ID;
-	client->client_id.size = strlen(CONFIG_ARP_MQTT_CLIENT_ID);
+	client->client_id.utf8 = (uint8_t *)mqtt_client_id;
+	client->client_id.size = strlen(mqtt_client_id);
 	client->password = NULL;
 	client->user_name = NULL;
 	client->protocol_version = MQTT_VERSION_3_1_1;

@@ -41,10 +41,6 @@ config ARP_MQTT_PUB_TOPIC_PREFIX
 	help
 	  Shell mqtt_pub <topic> publishes to <prefix><topic>.
 
-config ARP_MQTT_CLIENT_ID
-	string "MQTT client identifier"
-	default "nrf7002_arp_mqtt"
-
 config ARP_MQTT_APP_BUFFER_SIZE
 	int "MQTT library RX/TX buffer size (bytes)"
 	default 1024

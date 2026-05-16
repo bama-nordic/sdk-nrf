@@ -178,15 +178,16 @@ To disable IPv6 and use IPv4 only, set `CONFIG_NET_IPV6=n` in `prj.conf`.
 Defaults are defined in `Kconfig`; override in `prj.conf` if needed:
 
 ```conf
-CONFIG_ARP_MQTT_CLIENT_ID="my_device_01"
 CONFIG_ARP_MQTT_SUB_TOPIC="nrf/sub/#"
 CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX="nrf/pub/"
 CONFIG_ARP_MQTT_APP_BUFFER_SIZE=1024
 ```
 
+Each device derives its MQTT client ID at connect time as `nrf_` plus the four least significant hex digits of the Wi-Fi MAC (for example `nrf_E5F6`). The same firmware hex can be flashed to every DUT; IDs remain unique per board. The assigned ID is logged once at connect (`MQTT client ID nrf_XXXX`).
+
 | Variable | Description |
 |----------|-------------|
-| `CONFIG_ARP_MQTT_CLIENT_ID` | MQTT client identifier presented to the broker |
+| `CONFIG_HW_ID_LIBRARY` / `CONFIG_HW_ID_LIBRARY_SOURCE_NET_MAC` | Required for MAC-based client ID (enabled in `prj.conf`) |
 | `CONFIG_ARP_MQTT_SUB_TOPIC` | Topic filter for subscriptions |
 | `CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX` | Prefix for shell publish topics |
 | `CONFIG_ARP_MQTT_APP_BUFFER_SIZE` | MQTT RX/TX and payload buffer size (bytes) |
