@@ -1,0 +1,53 @@
+#
+# Copyright (c) 2026 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+source "Kconfig.zephyr"
+
+menu "ARP MQTT Wi-Fi client"
+
+config ARP_MQTT_BROKER_HOSTNAME
+	string "MQTT broker hostname or IP address"
+	default "192.168.29.133"
+	help
+	  Broker IPv4 address, IPv6 address, or hostname.
+	  IPv6 literals use standard notation without brackets, for example
+	  2001:db8::1. Plain TCP only (not TLS).
+
+config ARP_MQTT_BROKER_PORT
+	int "MQTT broker TCP port"
+	default 1883
+	range 1 65535
+
+config ARP_MQTT_BROKER_PREFER_IPV6
+	bool "Prefer IPv6 when resolving broker hostname"
+	default n
+	depends on NET_IPV6
+	help
+	  When both A and AAAA DNS records exist, connect to the IPv6 address.
+	  Literal IPv4/IPv6 strings in ARP_MQTT_BROKER_HOSTNAME are always honored.
+
+config ARP_MQTT_SUB_TOPIC
+	string "MQTT subscribe topic filter"
+	default "nrf/sub/#"
+	help
+	  MQTT topic filter for incoming messages (nrf/sub/* uses # wildcard).
+
+config ARP_MQTT_PUB_TOPIC_PREFIX
+	string "MQTT publish topic prefix"
+	default "nrf/pub/"
+	help
+	  Shell mqtt_pub <topic> publishes to <prefix><topic>.
+
+config ARP_MQTT_CLIENT_ID
+	string "MQTT client identifier"
+	default "nrf7002_arp_mqtt"
+
+config ARP_MQTT_APP_BUFFER_SIZE
+	int "MQTT library RX/TX buffer size (bytes)"
+	default 1024
+	range 256 4096
+
+endmenu
