@@ -1,0 +1,35 @@
+sample:
+  description: Wi-Fi shell and Bluetooth LE shell combo sample application
+  name: Wi-Fi and BLE combo shell
+tests:
+  # nRF54LM20 DK uses an external nRF7002 EB-II shield for Wi-Fi.
+  sample.54lm20dk.nrf7002eb2.wifi_ble_combo_shell:
+    sysbuild: true
+    build_only: true
+    extra_args:
+      - SHIELD=nrf7002eb2
+    integration_platforms:
+      - nrf54lm20dk/nrf54lm20a/cpuapp
+    platform_allow:
+      - nrf54lm20dk/nrf54lm20a/cpuapp
+    tags:
+      - ci_build
+      - sysbuild
+      - ci_samples_wifi
+      - bluetooth
+  # nRF7120 DK has integrated Wi-Fi, so no shield is needed and the
+  # standalone nRF70 image is disabled.
+  sample.nrf7120.wifi_ble_combo_shell:
+    sysbuild: true
+    build_only: true
+    extra_args:
+      - SB_CONFIG_WIFI_NRF70=n
+    integration_platforms:
+      - nrf7120dk/nrf7120/cpuapp
+    platform_allow:
+      - nrf7120dk/nrf7120/cpuapp
+    tags:
+      - ci_build
+      - sysbuild
+      - ci_samples_wifi
+      - bluetooth
