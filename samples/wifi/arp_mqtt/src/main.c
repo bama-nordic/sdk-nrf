@@ -12,9 +12,11 @@
 #include <zephyr/logging/log.h>
 #include <zephyr/net/conn_mgr_connectivity.h>
 #include <zephyr/net/conn_mgr_monitor.h>
+#include <zephyr/net/icmp.h>
 #include <zephyr/net/mqtt.h>
 #include <zephyr/net/net_ip.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/random/random.h>
 #include <zephyr/posix/arpa/inet.h>
 #include <zephyr/posix/netdb.h>
 #include <zephyr/posix/poll.h>
@@ -31,6 +33,14 @@ LOG_MODULE_REGISTER(arp_mqtt, CONFIG_LOG_DEFAULT_LEVEL);
 #define MQTT_SUB_TOPIC   CONFIG_ARP_MQTT_SUB_TOPIC
 #define MQTT_PUB_PREFIX  CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX
 
+/* Periodic RTT report: ping the broker N times and publish the delays. */
+#define RTT_TOPIC          "nrf/rtt"
+#define RTT_PING_COUNT     3
+#define RTT_PING_INTERVAL  K_MSEC(1000)
+#define RTT_PING_TIMEOUT   K_MSEC(1000)
+/* Each entry is at most "65535ms," -> 8 chars; allow margin for "Nan" too. */
+#define RTT_PAYLOAD_SIZE   (RTT_PING_COUNT * 10)
+
 static uint8_t rx_buffer[MQTT_BUFFER_SIZE];
 static uint8_t tx_buffer[MQTT_BUFFER_SIZE];
 
@@ -44,6 +54,12 @@ static volatile bool mqtt_got_connack;
 static char mqtt_client_id[9];
 
 static K_MUTEX_DEFINE(mqtt_lock);
+
+/* ICMP echo (ping) state for the periodic RTT report. */
+static struct net_icmp_ctx ping_icmp_ctx;
+static K_SEM_DEFINE(ping_reply_sem, 0, 1);
+static uint16_t ping_identifier;
+static uint16_t ping_active_sequence;
 
 static int mqtt_client_id_set(void)
 {
@@ -484,6 +500,134 @@ static int mqtt_publish_payload(struct mqtt_client *client, const char *topic,
 
 	return ret;
 }
+
+static enum net_verdict ping_reply_handler(struct net_icmp_ctx *ctx, struct net_pkt *pkt,
+					   struct net_icmp_ip_hdr *ip_hdr,
+					   struct net_icmp_hdr *icmp_hdr, void *user_data)
+{
+	ARG_UNUSED(ctx);
+	ARG_UNUSED(pkt);
+	ARG_UNUSED(ip_hdr);
+	ARG_UNUSED(icmp_hdr);
+	ARG_UNUSED(user_data);
+
+	/* Only one echo request is outstanding at a time, so any matching-family
+	 * reply that arrives while we are waiting is the one we sent.
+	 */
+	k_sem_give(&ping_reply_sem);
+
+	return NET_OK;
+}
+
+/* Send one echo request to the broker and return the round-trip time in
+ * milliseconds, or -1 on send error or timeout.
+ */
+static int ping_broker_once(uint16_t sequence)
+{
+	struct net_icmp_ping_params params = {
+		.identifier = ping_identifier,
+		.sequence = sequence,
+		.tc_tos = 0,
+		.priority = -1,
+		.data = NULL,
+		.data_size = 4,
+	};
+	int64_t start;
+	int ret;
+
+	k_sem_reset(&ping_reply_sem);
+	ping_active_sequence = sequence;
+
+	start = k_uptime_get();
+
+	ret = net_icmp_send_echo_request(&ping_icmp_ctx, NULL, (struct net_sockaddr *)&broker,
+					 &params, NULL);
+	if (ret < 0) {
+		LOG_WRN("ping send (seq %u) failed: %d", sequence, ret);
+		return -1;
+	}
+
+	if (k_sem_take(&ping_reply_sem, RTT_PING_TIMEOUT) != 0) {
+		LOG_WRN("ping timeout (seq %u)", sequence);
+		return -1;
+	}
+
+	return (int)(k_uptime_get() - start);
+}
+
+/* Ping the broker RTT_PING_COUNT times and build a comma-separated delay
+ * string such as "5ms,102ms,4ms". Failed pings are reported as "Nan".
+ */
+static void build_rtt_payload(char *buf, size_t buf_len)
+{
+	bool icmp_ready;
+	size_t off = 0;
+	int ret;
+
+	buf[0] = '\0';
+
+	ret = net_icmp_init_ctx(&ping_icmp_ctx, broker.ss_family,
+				(broker.ss_family == AF_INET6) ? NET_ICMPV6_ECHO_REPLY
+							       : NET_ICMPV4_ECHO_REPLY,
+				0, ping_reply_handler);
+	icmp_ready = (ret == 0);
+	if (!icmp_ready) {
+		LOG_WRN("net_icmp_init_ctx failed: %d (reporting Nan)", ret);
+	}
+
+	ping_identifier = sys_rand16_get();
+
+	for (uint16_t i = 0; i < RTT_PING_COUNT; i++) {
+		const char *sep = (i == 0) ? "" : ",";
+		int rtt = icmp_ready ? ping_broker_once(i + 1) : -1;
+
+		if (rtt >= 0) {
+			off += snprintk(&buf[off], buf_len - off, "%s%dms", sep, rtt);
+		} else {
+			off += snprintk(&buf[off], buf_len - off, "%sNan", sep);
+		}
+
+		if (off >= buf_len) {
+			LOG_WRN("RTT payload truncated");
+			break;
+		}
+
+		if (i < RTT_PING_COUNT - 1) {
+			k_sleep(RTT_PING_INTERVAL);
+		}
+	}
+
+	if (icmp_ready) {
+		(void)net_icmp_cleanup_ctx(&ping_icmp_ctx);
+	}
+}
+
+static void rtt_report_thread(void)
+{
+	char payload[RTT_PAYLOAD_SIZE];
+
+	for (;;) {
+		k_sleep(K_SECONDS(CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS));
+
+		if (!mqtt_got_connack) {
+			LOG_WRN("RTT report skipped: MQTT not connected");
+			continue;
+		}
+
+		build_rtt_payload(payload, sizeof(payload));
+
+		int ret = mqtt_publish_payload(&client_ctx, RTT_TOPIC, payload);
+
+		if (ret != 0) {
+			LOG_WRN("RTT publish to %s failed: %d", RTT_TOPIC, ret);
+		} else {
+			LOG_INF("Published RTT to %s: %s", RTT_TOPIC, payload);
+		}
+	}
+}
+
+K_THREAD_DEFINE(rtt_report_tid, 2048, rtt_report_thread, NULL, NULL, NULL,
+		K_LOWEST_APPLICATION_THREAD_PRIO, 0, 0);
 
 static int cmd_mqtt_pub(const struct shell *sh, size_t argc, char **argv)
 {

@@ -46,4 +46,13 @@ config ARP_MQTT_APP_BUFFER_SIZE
 	default 1024
 	range 256 4096
 
+config ARP_MQTT_RTT_PERIOD_SECONDS
+	int "Interval between periodic broker RTT reports (seconds)"
+	default 10
+	range 1 86400
+	help
+	  How often the sample pings the MQTT broker and publishes the
+	  comma-separated round-trip delays (for example "5ms,102ms,4ms",
+	  or "Nan" for a failed ping) to the nrf/rtt topic.
+
 endmenu
