@@ -14,8 +14,12 @@
 #include <zephyr/net/conn_mgr_monitor.h>
 #include <zephyr/net/icmp.h>
 #include <zephyr/net/mqtt.h>
+#include <zephyr/net/net_event.h>
+#include <zephyr/net/net_if.h>
 #include <zephyr/net/net_ip.h>
+#include <zephyr/net/net_mgmt.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/net/wifi_mgmt.h>
 #include <zephyr/random/random.h>
 #include <zephyr/posix/arpa/inet.h>
 #include <zephyr/posix/netdb.h>
@@ -33,6 +37,7 @@ LOG_MODULE_REGISTER(arp_mqtt, CONFIG_LOG_DEFAULT_LEVEL);
 #define MQTT_SUB_TOPIC   CONFIG_ARP_MQTT_SUB_TOPIC
 #define MQTT_PUB_PREFIX  CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX
 
+#if defined(CONFIG_ARP_MQTT_PERIODIC_PUB)
 /* Periodic RTT report: ping the broker N times and publish the delays. */
 #define RTT_TOPIC          "nrf/rtt"
 #define RTT_PING_COUNT     3
@@ -40,6 +45,7 @@ LOG_MODULE_REGISTER(arp_mqtt, CONFIG_LOG_DEFAULT_LEVEL);
 #define RTT_PING_TIMEOUT   K_MSEC(1000)
 /* Each entry is at most "65535ms," -> 8 chars; allow margin for "Nan" too. */
 #define RTT_PAYLOAD_SIZE   (RTT_PING_COUNT * 10)
+#endif /* CONFIG_ARP_MQTT_PERIODIC_PUB */
 
 static uint8_t rx_buffer[MQTT_BUFFER_SIZE];
 static uint8_t tx_buffer[MQTT_BUFFER_SIZE];
@@ -55,11 +61,28 @@ static char mqtt_client_id[9];
 
 static K_MUTEX_DEFINE(mqtt_lock);
 
+/* Per-family L4 connectivity, tracked so the broker connect is only attempted
+ * once the relevant IP family has a usable address. With dual-stack enabled the
+ * generic NET_EVENT_L4_CONNECTED fires as soon as *either* family is up (IPv6
+ * link-local/RA is typically ready well before IPv4 DHCP), which would make the
+ * first connect attempts to an IPv4 broker fail with -EINVAL.
+ */
+#define L4_FAMILY_EVENT_MASK                                                    \
+	(NET_EVENT_L4_IPV4_CONNECTED | NET_EVENT_L4_IPV4_DISCONNECTED |         \
+	 NET_EVENT_L4_IPV6_CONNECTED | NET_EVENT_L4_IPV6_DISCONNECTED)
+
+static struct net_mgmt_event_callback l4_family_cb;
+static atomic_t ipv4_connected;
+static atomic_t ipv6_connected;
+static K_SEM_DEFINE(l4_family_changed, 0, 1);
+
+#if defined(CONFIG_ARP_MQTT_PERIODIC_PUB)
 /* ICMP echo (ping) state for the periodic RTT report. */
 static struct net_icmp_ctx ping_icmp_ctx;
 static K_SEM_DEFINE(ping_reply_sem, 0, 1);
 static uint16_t ping_identifier;
 static uint16_t ping_active_sequence;
+#endif /* CONFIG_ARP_MQTT_PERIODIC_PUB */
 
 static int mqtt_client_id_set(void)
 {
@@ -408,6 +431,64 @@ static int mqtt_subscribe_topics(struct mqtt_client *client)
 	return mqtt_subscribe(client, &sub_list);
 }
 
+static void l4_family_event_handler(struct net_mgmt_event_callback *cb, uint64_t event,
+				    struct net_if *iface)
+{
+	ARG_UNUSED(cb);
+	ARG_UNUSED(iface);
+
+	switch (event) {
+	case NET_EVENT_L4_IPV4_CONNECTED:
+		atomic_set(&ipv4_connected, 1);
+		break;
+	case NET_EVENT_L4_IPV4_DISCONNECTED:
+		atomic_set(&ipv4_connected, 0);
+		break;
+	case NET_EVENT_L4_IPV6_CONNECTED:
+		atomic_set(&ipv6_connected, 1);
+		break;
+	case NET_EVENT_L4_IPV6_DISCONNECTED:
+		atomic_set(&ipv6_connected, 0);
+		break;
+	default:
+		return;
+	}
+
+	k_sem_give(&l4_family_changed);
+}
+
+static bool broker_family_connected(sa_family_t family)
+{
+	if (family == AF_INET) {
+		return atomic_get(&ipv4_connected) != 0;
+	}
+
+	if (family == AF_INET6) {
+		return atomic_get(&ipv6_connected) != 0;
+	}
+
+	return false;
+}
+
+/* Block until the broker's IP family has L4 connectivity, so the first connect
+ * does not race the address assignment. Returns -ETIMEDOUT if it does not come
+ * up in time; the caller then falls through and lets the connect retry.
+ */
+static int wait_for_broker_family(sa_family_t family)
+{
+	int64_t deadline = k_uptime_get() + 30000;
+
+	while (!broker_family_connected(family)) {
+		if (k_uptime_get() >= deadline) {
+			return -ETIMEDOUT;
+		}
+
+		(void)k_sem_take(&l4_family_changed, K_MSEC(500));
+	}
+
+	return 0;
+}
+
 static int try_mqtt_connect(struct mqtt_client *client)
 {
 	int ret;
@@ -419,6 +500,10 @@ static int try_mqtt_connect(struct mqtt_client *client)
 		if (broker_addr_setup() != 0) {
 			k_sleep(K_SECONDS(2));
 			continue;
+		}
+
+		if (wait_for_broker_family(broker.ss_family) != 0) {
+			LOG_WRN("No L4 connectivity for broker family yet");
 		}
 
 		client_init(client);
@@ -501,6 +586,7 @@ static int mqtt_publish_payload(struct mqtt_client *client, const char *topic,
 	return ret;
 }
 
+#if defined(CONFIG_ARP_MQTT_PERIODIC_PUB)
 static enum net_verdict ping_reply_handler(struct net_icmp_ctx *ctx, struct net_pkt *pkt,
 					   struct net_icmp_ip_hdr *ip_hdr,
 					   struct net_icmp_hdr *icmp_hdr, void *user_data)
@@ -628,6 +714,7 @@ static void rtt_report_thread(void)
 
 K_THREAD_DEFINE(rtt_report_tid, 2048, rtt_report_thread, NULL, NULL, NULL,
 		K_LOWEST_APPLICATION_THREAD_PRIO, 0, 0);
+#endif /* CONFIG_ARP_MQTT_PERIODIC_PUB */
 
 static int cmd_mqtt_pub(const struct shell *sh, size_t argc, char **argv)
 {
@@ -673,17 +760,69 @@ SHELL_CMD_REGISTER(mqtt_pub, NULL,
 		 "Publish <value> to " MQTT_PUB_PREFIX "<topic>: mqtt_pub <topic> <value>",
 		 cmd_mqtt_pub);
 
+#if defined(CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL)
+static int wifi_set_listen_interval(void)
+{
+	struct net_if *iface = net_if_get_first_wifi();
+	struct wifi_ps_params li_params = {
+		.type = WIFI_PS_PARAM_LISTEN_INTERVAL,
+		.listen_interval = CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL_VALUE,
+	};
+	struct wifi_ps_params wakeup_params = {
+		.type = WIFI_PS_PARAM_WAKEUP_MODE,
+		.wakeup_mode = WIFI_PS_WAKEUP_MODE_LISTEN_INTERVAL,
+	};
+	int err;
+
+	if (iface == NULL) {
+		LOG_ERR("No Wi-Fi interface found");
+		return -ENODEV;
+	}
+
+	err = net_mgmt(NET_REQUEST_WIFI_PS, iface, &li_params, sizeof(li_params));
+	if (err) {
+		LOG_ERR("Failed to set listen interval (%u): %d (reason %d)",
+			li_params.listen_interval, err, li_params.fail_reason);
+		return err;
+	}
+
+	err = net_mgmt(NET_REQUEST_WIFI_PS, iface, &wakeup_params, sizeof(wakeup_params));
+	if (err) {
+		LOG_ERR("Failed to set listen interval wakeup mode: %d (reason %d)",
+			err, wakeup_params.fail_reason);
+		return err;
+	}
+
+	LOG_INF("Wi-Fi power save: listen interval wakeup, %u beacon intervals",
+		li_params.listen_interval);
+
+	return 0;
+}
+#endif /* CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL */
+
 int main(void)
 {
 	int err;
 
 	LOG_INF("ARP MQTT (Wi-Fi) client starting");
 
+	net_mgmt_init_event_callback(&l4_family_cb, l4_family_event_handler,
+				     L4_FAMILY_EVENT_MASK);
+	net_mgmt_add_event_callback(&l4_family_cb);
+
 	err = conn_mgr_all_if_up(true);
 	if (err) {
 		LOG_ERR("conn_mgr_all_if_up: %d", err);
 		return err;
 	}
+
+#if defined(CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL)
+	/* The listen interval is part of the association request, so the Wi-Fi
+	 * stack only accepts it while the station is not associated. Configure
+	 * it after the interface is up but before initiating the connection.
+	 */
+	(void)wifi_set_listen_interval();
+#endif
 
 	err = conn_mgr_all_if_connect(true);
 	if (err) {

@@ -10,6 +10,7 @@ This sample demonstrates end-to-end connectivity from an nRF7002-based board to 
 2. **MQTT** — A non-TLS MQTT 3.1.1 client connects to the configured broker (IPv4, IPv6, or DNS hostname), subscribes to a topic filter, and maintains the session with automatic reconnect.
 3. **Shell** — The `mqtt_pub` command publishes a user-supplied payload to a topic under `nrf/pub/`.
 4. **Periodic RTT report** — A background thread periodically pings the broker (ICMP echo) and publishes the measured round-trip delays to the `nrf/rtt` topic.
+5. **Wi-Fi power save (optional)** — When enabled, the sample programs a configurable listen interval and switches the station to listen-interval based power-save wakeup before associating. Disabled by default.
 
 Incoming messages on the subscribe filter are logged with topic and payload. Publish operations from the shell are silent on success (no log or shell output).
 
@@ -47,12 +48,15 @@ The broker and the DK must be on the same IP network (or routable). The sample d
 
 ### Startup sequence
 
-1. `main()` enables all interfaces and requests connection through the Connection Manager.
-2. `wait_for_network()` blocks until L4 connectivity is available (IPv4 DHCP bound; from `net_sample_common`).
-3. `try_mqtt_connect()` resolves the broker to IPv4 or IPv6, opens a TCP socket, sends `CONNECT`, and waits for `CONNACK`.
-4. On success, the client subscribes to the configured topic filter (default `nrf/sub/#`).
-5. The main loop calls `mqtt_process()` to handle keepalive, incoming publishes, and disconnects. On failure, the client disconnects, waits, and reconnects.
-6. A separate background thread (`rtt_report_thread`) wakes every `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` and, while the MQTT session is up, pings the broker and publishes the result to `nrf/rtt` (see [Periodic RTT report](#periodic-rtt-report)).
+1. `main()` brings all interfaces up through the Connection Manager.
+2. If `CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL=y`, `wifi_set_listen_interval()` programs the Wi-Fi power-save listen interval and switches the wakeup mode to listen interval **before** the connection is initiated (see [Wi-Fi power-save listen interval](#wi-fi-power-save-listen-interval)).
+3. `main()` requests the connection, and `wait_for_network()` blocks until L4 connectivity is available (from `net_sample_common`).
+4. `try_mqtt_connect()` resolves the broker, waits until the broker's IP family has L4 connectivity (see note below), opens a TCP socket, sends `CONNECT`, and waits for `CONNACK`.
+
+> Note: with dual-stack enabled, `NET_EVENT_L4_CONNECTED` fires as soon as *either* family is up — IPv6 (link-local/RA) is usually ready well before IPv4 DHCP completes. Connecting to an IPv4 broker in that window fails with `-EINVAL` because no IPv4 source address exists yet. The sample tracks the per-family conn_mgr events (`NET_EVENT_L4_IPV4_CONNECTED` / `NET_EVENT_L4_IPV6_CONNECTED`) and only attempts the broker connect once the broker's family is actually up, avoiding those transient failures.
+5. On success, the client subscribes to the configured topic filter (default `nrf/sub/#`).
+6. The main loop calls `mqtt_process()` to handle keepalive, incoming publishes, and disconnects. On failure, the client disconnects, waits, and reconnects.
+7. A separate background thread (`rtt_report_thread`) wakes every `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` and, while the MQTT session is up, pings the broker and publishes the result to `nrf/rtt` (see [Periodic RTT report](#periodic-rtt-report)).
 
 ### IPv4 and IPv6
 
@@ -104,7 +108,7 @@ Maximum payload length is `CONFIG_ARP_MQTT_APP_BUFFER_SIZE - 1` (default 1023 by
 
 ### Periodic RTT report
 
-A dedicated background thread (`rtt_report_thread`) periodically measures the network round-trip time to the MQTT broker and publishes the result to the `nrf/rtt` topic.
+A dedicated background thread (`rtt_report_thread`) periodically measures the network round-trip time to the MQTT broker and publishes the result to the `nrf/rtt` topic. This autonomous publishing is controlled by `CONFIG_ARP_MQTT_PERIODIC_PUB` (**enabled by default**); set it to `n` to compile out the thread entirely, leaving only the shell `mqtt_pub` command for publishing.
 
 Each cycle:
 
@@ -126,6 +130,25 @@ On the DK UART, each published report is logged:
 ```
 
 > Note: round-trip times below 1 ms are reported as `0ms` because the delay is measured at millisecond resolution.
+
+### Wi-Fi power-save listen interval
+
+This optional feature lets the station sleep longer between wake-ups to save power. It is **disabled by default**.
+
+When `CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL=y`, after the Wi-Fi interface is brought up but **before** the connection is initiated, the sample calls `wifi_set_listen_interval()`, which issues two `net_mgmt(NET_REQUEST_WIFI_PS, ...)` requests on the Wi-Fi station interface:
+
+1. `WIFI_PS_PARAM_LISTEN_INTERVAL` — sets the listen interval to `CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL_VALUE` (default **10**).
+2. `WIFI_PS_PARAM_WAKEUP_MODE` — sets the power-save wakeup mode to `WIFI_PS_WAKEUP_MODE_LISTEN_INTERVAL`.
+
+On success the DK logs:
+
+```text
+[inf] arp_mqtt: Wi-Fi power save: listen interval wakeup, 10 beacon intervals
+```
+
+> Important: the listen interval is advertised to the AP in the association request, so the Wi-Fi stack only accepts `WIFI_PS_PARAM_LISTEN_INTERVAL` while the station is **not** associated. Setting it after the connection is established fails with `-ENOTSUP` and `fail_reason = WIFI_PS_PARAM_FAIL_DEVICE_CONNECTED`. That is why the sample configures it before connecting.
+
+> Note: the listen interval value is expressed in **beacon intervals**, not seconds. The wall-clock sleep time depends on the AP beacon interval (a typical 100 TU beacon is ~102.4 ms, so a value of 10 is roughly 1 s). A larger listen interval saves more power but increases downlink latency, because buffered frames at the AP are only delivered when the station wakes.
 
 ## Configuration
 
@@ -210,6 +233,7 @@ Defaults are defined in `Kconfig`; override in `prj.conf` if needed:
 CONFIG_ARP_MQTT_SUB_TOPIC="nrf/sub/#"
 CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX="nrf/pub/"
 CONFIG_ARP_MQTT_APP_BUFFER_SIZE=1024
+CONFIG_ARP_MQTT_PERIODIC_PUB=y
 CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS=60
 ```
 
@@ -221,7 +245,71 @@ Each device derives its MQTT client ID at connect time as `nrf_` plus the four l
 | `CONFIG_ARP_MQTT_SUB_TOPIC` | Topic filter for subscriptions |
 | `CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX` | Prefix for shell publish topics |
 | `CONFIG_ARP_MQTT_APP_BUFFER_SIZE` | MQTT RX/TX and payload buffer size (bytes) |
-| `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` | Interval, in seconds, between periodic broker RTT reports published to `nrf/rtt` (default 60, range 1–86400) |
+| `CONFIG_ARP_MQTT_PERIODIC_PUB` | Enable the autonomous periodic RTT publish thread (default **y**) |
+| `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` | Interval, in seconds, between periodic broker RTT reports published to `nrf/rtt` (default 60, range 1–86400; requires `CONFIG_ARP_MQTT_PERIODIC_PUB`) |
+
+#### Changing the subscribe topic (`CONFIG_ARP_MQTT_SUB_TOPIC`)
+
+`CONFIG_ARP_MQTT_SUB_TOPIC` is a Kconfig **string**, so its value must include literal double quotes. There are three ways to set it; the simplest is to edit `prj.conf`.
+
+**Option 1 — `prj.conf` (recommended):**
+
+```conf
+CONFIG_ARP_MQTT_SUB_TOPIC="nrf/device1/#"
+```
+
+**Option 2 — a per-device Kconfig fragment.** Useful when flashing several DUTs with different topics from the same source tree. Create `device1.conf`:
+
+```conf
+CONFIG_ARP_MQTT_SUB_TOPIC="nrf/device1/#"
+```
+
+Then build with:
+
+```bash
+west build -p -b nrf54lm20dk/nrf54lm20a/cpuapp -- \
+  -Darp_mqtt_SHIELD="nrf7002eb2" \
+  -DEXTRA_CONF_FILE="device1.conf"
+```
+
+**Option 3 — a one-off command-line override.** The double quotes must survive both the shell and CMake, so they have to be escaped; otherwise Kconfig receives an unquoted value and reports `malformed string literal in assignment to ARP_MQTT_SUB_TOPIC ... Assignment ignored`:
+
+```bash
+west build -p -b nrf54lm20dk/nrf54lm20a/cpuapp -- \
+  -Darp_mqtt_SHIELD="nrf7002eb2" \
+  "-DCONFIG_ARP_MQTT_SUB_TOPIC=\"nrf/device1/#\""
+```
+
+Equivalently, single-quote the whole argument so the inner double quotes stay literal:
+
+```bash
+'-DCONFIG_ARP_MQTT_SUB_TOPIC="nrf/device1/#"'
+```
+
+> Note: this escaping is only needed for Kconfig **string** symbols. Non-string symbols such as `-Darp_mqtt_SHIELD=...` (a CMake variable) or boolean/integer Kconfig options are not quoted and do not need escaping.
+
+Verify the value was applied after building:
+
+```bash
+grep ARP_MQTT_SUB_TOPIC build/arp_mqtt/zephyr/.config
+# CONFIG_ARP_MQTT_SUB_TOPIC="nrf/device1/#"
+```
+
+### Wi-Fi power-save listen interval (optional)
+
+Disabled by default. To enable listen-interval based power-save wakeup, add to `prj.conf`:
+
+```conf
+CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL=y
+CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL_VALUE=10
+```
+
+| Variable | Description |
+|----------|-------------|
+| `CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL` | Enable configuring the Wi-Fi power-save listen interval and listen-interval wakeup mode after the network is up (default **n**) |
+| `CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL_VALUE` | Listen interval in beacon intervals (default **10**, range 0–65535) |
+
+See [Wi-Fi power-save listen interval](#wi-fi-power-save-listen-interval) for behavior details.
 
 ### Configuration checklist
 
@@ -341,7 +429,7 @@ west build -t menuconfig
 Relevant menus:
 
 - **Wi-Fi credentials** — static SSID/password (if not only in `prj.conf`)
-- **ARP MQTT Wi-Fi client** — broker, topics, buffer size, IPv6 preference, RTT report period
+- **ARP MQTT Wi-Fi client** — broker, topics, buffer size, IPv6 preference, RTT report period, Wi-Fi listen interval
 - **Networking** — IPv4/IPv6 options
 
 Save and exit, then rebuild.

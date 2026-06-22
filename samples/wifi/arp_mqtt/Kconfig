@@ -46,13 +46,40 @@ config ARP_MQTT_APP_BUFFER_SIZE
 	default 1024
 	range 256 4096
 
+config ARP_MQTT_PERIODIC_PUB
+	bool "Autonomous periodic MQTT publish (RTT report)"
+	default y
+	help
+	  Run a background thread that, while the MQTT session is up,
+	  periodically pings the broker and publishes the round-trip delays
+	  to the nrf/rtt topic. Disable to stop all autonomous publishing;
+	  the shell mqtt_pub command remains available.
+
 config ARP_MQTT_RTT_PERIOD_SECONDS
 	int "Interval between periodic broker RTT reports (seconds)"
+	depends on ARP_MQTT_PERIODIC_PUB
 	default 10
 	range 1 86400
 	help
 	  How often the sample pings the MQTT broker and publishes the
 	  comma-separated round-trip delays (for example "5ms,102ms,4ms",
 	  or "Nan" for a failed ping) to the nrf/rtt topic.
+
+config ARP_MQTT_WIFI_LISTEN_INTERVAL
+	bool "Configure Wi-Fi power-save listen interval"
+	default n
+	help
+	  Once the network connection is up, set the Wi-Fi power-save wakeup
+	  mode to listen interval and program the listen interval value
+	  (in beacon intervals) given by ARP_MQTT_WIFI_LISTEN_INTERVAL_VALUE.
+
+config ARP_MQTT_WIFI_LISTEN_INTERVAL_VALUE
+	int "Wi-Fi listen interval (beacon intervals)"
+	depends on ARP_MQTT_WIFI_LISTEN_INTERVAL
+	default 10
+	range 0 65535
+	help
+	  Number of beacon intervals between station wake-ups when the
+	  listen-interval based power-save wakeup mode is used.
 
 endmenu
