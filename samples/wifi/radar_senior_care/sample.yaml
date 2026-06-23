@@ -1,0 +1,17 @@
+sample:
+  description: Acconeer A121 senior-care radar monitor (presence, breathing,
+    fall detection) streaming over Wi-Fi/MQTT to a dashboard
+  name: radar-senior-care
+tests:
+  sample.wifi.radar_senior_care:
+    sysbuild: true
+    build_only: true
+    extra_args:
+      - radar_senior_care_SHIELD=nrf7002eb2
+    integration_platforms:
+      - nrf54lm20dk/nrf54lm20a/cpuapp
+    platform_allow: nrf54lm20dk/nrf54lm20a/cpuapp
+    tags:
+      - ci_build
+      - sysbuild
+      - ci_samples_wifi

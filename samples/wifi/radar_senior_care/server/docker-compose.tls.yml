@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Nordic Semiconductor ASA
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+# TLS + auth overlay for docker-compose. Run gen_certs.sh first, then:
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+#
+# This swaps the broker to the TLS/auth config (port 8883) and points the app
+# at it over TLS.
+
+services:
+  mosquitto:
+    ports:
+      - "8883:8883"   # MQTT over TLS
+      - "9001:9001"   # MQTT over TLS WebSocket
+    volumes:
+      - ./broker/mosquitto-tls.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./broker/certs:/mosquitto/certs:ro
+      - ./broker/passwd:/mosquitto/config/passwd:ro
+
+  app:
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "8883"
+      MQTT_TLS: "1"
+      MQTT_CA_CERT: /certs/ca.crt
+      MQTT_USERNAME: room-device
+      MQTT_PASSWORD: change-me
+    volumes:
+      - ./broker/certs:/certs:ro

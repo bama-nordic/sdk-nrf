@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<!--
+ Copyright (c) 2026 Nordic Semiconductor ASA
+ SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+
+ Senior-care dashboard. Single self-contained file with NO external/CDN
+ dependencies (works offline / on air-gapped lab networks). Renders realtime
+ room status from the FastAPI WebSocket feed at /ws using plain DOM APIs.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Senior Care Monitor</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #171c24; --panel2: #1f2630; --text: #e6edf3;
+    --muted: #8b97a7; --ok: #2ea043; --warn: #d29922; --alert: #f85149;
+    --accent: #2f81f7; --border: #2a313c;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+  header { display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  .conn { font-size: 13px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--alert); }
+  .dot.up { background: var(--ok); }
+  .grid { display: grid; gap: 16px; padding: 24px;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px; transition: box-shadow .2s; }
+  .card.alert { border-color: var(--alert); animation: pulse 1.1s infinite; }
+  @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(248,81,73,.5);} 50% { box-shadow: 0 0 0 8px rgba(248,81,73,0);} }
+  .card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .room { font-weight: 600; font-size: 16px; }
+  .badge { font-size: 11px; padding: 3px 8px; border-radius: 20px; font-weight: 600; }
+  .badge.online { background: rgba(46,160,67,.15); color: var(--ok); }
+  .badge.offline { background: rgba(139,151,167,.15); color: var(--muted); }
+  .rows { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .metric { background: var(--panel2); border-radius: 8px; padding: 10px 12px; }
+  .metric .label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  .metric .value { font-size: 22px; font-weight: 700; margin-top: 2px; }
+  .metric .sub { font-size: 12px; color: var(--muted); }
+  .present { color: var(--ok); } .away { color: var(--muted); }
+  .wave { margin-top: 12px; background: var(--panel2); border-radius: 8px; padding: 8px; }
+  .banner { margin-top: 12px; background: var(--alert); color: #fff; border-radius: 8px;
+    padding: 10px 12px; display: flex; justify-content: space-between; align-items: center; }
+  .banner.suspected { background: var(--warn); color: #1a1300; }
+  .banner button { background: #fff; color: #111; border: 0; border-radius: 6px;
+    padding: 6px 12px; font-weight: 600; cursor: pointer; }
+  .empty { color: var(--muted); padding: 40px; text-align: center; grid-column: 1/-1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Senior Care Monitor</h1>
+  <div class="conn"><span id="conn-dot" class="dot"></span><span id="conn-text">Connecting&hellip;</span></div>
+</header>
+<div id="grid" class="grid"></div>
+
+<script>
+"use strict";
+
+var rooms = {};
+var connected = false;
+var alerted = {};      // room_id -> true once we've beeped for a confirmed fall
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+  });
+}
+
+function beep() {
+  try {
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    var ctx = new Ctx();
+    var o = ctx.createOscillator(), g = ctx.createGain();
+    o.connect(g); g.connect(ctx.destination);
+    o.frequency.value = 880; g.gain.value = 0.1;
+    o.start(); o.stop(ctx.currentTime + 0.25);
+  } catch (e) { /* autoplay may be blocked until the user interacts */ }
+}
+
+function waveformSvg(samples) {
+  if (!samples || !samples.length) {
+    return '<div class="sub">no breathing waveform</div>';
+  }
+  var w = 260, h = 48, n = samples.length;
+  var max = 1e-3;
+  for (var i = 0; i < n; i++) { max = Math.max(max, Math.abs(samples[i])); }
+  var pts = [];
+  for (var j = 0; j < n; j++) {
+    var x = (n > 1 ? (j / (n - 1)) : 0) * w;
+    var y = h / 2 - (samples[j] / max) * (h / 2 - 4);
+    pts.push(x.toFixed(1) + "," + y.toFixed(1));
+  }
+  return '<svg width="100%" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' +
+         '<polyline points="' + pts.join(" ") + '" fill="none" stroke="#2f81f7" stroke-width="2" /></svg>';
+}
+
+function roomCard(room) {
+  var fall = room.fall || { state: "none" };
+  var alerting = fall.state === "confirmed";
+  var suspected = fall.state === "suspected";
+  var presence = room.presence || {};
+  var breathing = room.breathing || {};
+  var present = !!presence.present;
+  var nbsp = "\u00a0";
+
+  var distSub = (present && presence.distance_m) ? presence.distance_m.toFixed(1) + " m" : nbsp;
+  var bpm = breathing.valid ? breathing.rate_bpm.toFixed(0) : "--";
+  var bpmSub = breathing.valid ? "conf " + (breathing.confidence * 100).toFixed(0) + "%" : nbsp;
+
+  var banner = "";
+  if (alerting || suspected) {
+    var conf = fall.confidence ? " (" + (fall.confidence * 100).toFixed(0) + "%)" : "";
+    var label = alerting ? "\u26a0 FALL DETECTED" : "Possible fall\u2026";
+    var btn = alerting ? '<button data-ack="' + esc(room.room_id) + '">Acknowledge</button>' : "";
+    banner = '<div class="banner' + (suspected ? " suspected" : "") + '">' +
+             '<span>' + label + conf + '</span>' + btn + '</div>';
+  }
+
+  return '' +
+    '<div class="card' + (alerting ? " alert" : "") + '">' +
+      '<div class="card-top">' +
+        '<span class="room">' + esc(room.room_id) + '</span>' +
+        '<span class="badge ' + (room.online ? "online" : "offline") + '">' +
+          (room.online ? "ONLINE" : "OFFLINE") + '</span>' +
+      '</div>' +
+      '<div class="rows">' +
+        '<div class="metric"><div class="label">Presence</div>' +
+          '<div class="value ' + (present ? "present" : "away") + '">' +
+          (present ? "Present" : "Away") + '</div>' +
+          '<div class="sub">' + distSub + '</div></div>' +
+        '<div class="metric"><div class="label">Breathing</div>' +
+          '<div class="value">' + bpm + '<span class="sub"> bpm</span></div>' +
+          '<div class="sub">' + bpmSub + '</div></div>' +
+      '</div>' +
+      '<div class="wave">' + waveformSvg(room.wave) + '</div>' +
+      banner +
+    '</div>';
+}
+
+function render() {
+  document.getElementById("conn-dot").className = "dot" + (connected ? " up" : "");
+  document.getElementById("conn-text").textContent = connected ? "Live" : "Reconnecting\u2026";
+
+  var list = Object.keys(rooms).sort().map(function (k) { return rooms[k]; });
+  var grid = document.getElementById("grid");
+  if (list.length === 0) {
+    grid.innerHTML = '<div class="empty">Waiting for room devices to report...</div>';
+    return;
+  }
+  grid.innerHTML = list.map(roomCard).join("");
+}
+
+function upsert(room) {
+  rooms[room.room_id] = Object.assign({}, rooms[room.room_id], room);
+  if (room.fall && room.fall.state === "confirmed" && !alerted[room.room_id]) {
+    alerted[room.room_id] = true;
+    beep();
+  }
+  if (room.fall && room.fall.state === "none") {
+    delete alerted[room.room_id];
+  }
+}
+
+document.getElementById("grid").addEventListener("click", function (ev) {
+  var btn = ev.target.closest("button[data-ack]");
+  if (btn) {
+    fetch("/api/rooms/" + encodeURIComponent(btn.getAttribute("data-ack")) + "/ack",
+          { method: "POST" });
+  }
+});
+
+(function connect() {
+  var proto = location.protocol === "https:" ? "wss" : "ws";
+  var ws = new WebSocket(proto + "://" + location.host + "/ws");
+  ws.onopen = function () { connected = true; render(); };
+  ws.onclose = function () { connected = false; render(); setTimeout(connect, 2000); };
+  ws.onmessage = function (ev) {
+    var msg = JSON.parse(ev.data);
+    if (msg.type === "snapshot") {
+      rooms = {};
+      msg.rooms.forEach(function (r) { rooms[r.room_id] = r; });
+      render();
+    } else if (msg.type === "update") {
+      upsert(msg.room);
+      render();
+    }
+  };
+})();
+
+render();
+</script>
+</body>
+</html>

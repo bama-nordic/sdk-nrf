@@ -1,0 +1,150 @@
+#
+# Copyright (c) 2026 Nordic Semiconductor ASA
+#
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+
+source "Kconfig.zephyr"
+
+menu "Senior-care radar monitor"
+
+config RADAR_CARE_SITE_ID
+	string "Site identifier"
+	default "site1"
+	help
+	  Logical site/facility identifier used in the MQTT topic tree
+	  (care/<site>/<room>/...).
+
+config RADAR_CARE_ROOM_ID
+	string "Room identifier"
+	default ""
+	help
+	  Room/device identifier used in the MQTT topic tree and as the MQTT
+	  client id. If left empty, an id is derived from the Wi-Fi MAC
+	  (for example "room_AEDA").
+
+choice RADAR_CARE_SENSOR_BACKEND
+	prompt "Radar sensor backend"
+	default RADAR_CARE_SENSOR_SYNTHETIC
+	help
+	  Selects whether the application drives a real Acconeer A121 sensor or
+	  emits simulated data. Synthetic mode lets the full Wi-Fi/MQTT/dashboard
+	  pipeline be built and tested without hardware or the Acconeer SDK.
+
+config RADAR_CARE_SENSOR_SYNTHETIC
+	bool "Synthetic (simulated) radar data"
+
+config RADAR_CARE_SENSOR_A121
+	bool "Acconeer A121 radar (requires external SDK)"
+	help
+	  Drives a real A121 over SPI using the Acconeer RSS libraries and the
+	  Zephyr HAL port. Requires the external SDK (see CMakeLists.txt and
+	  DESIGN.md, Appendix A).
+
+endchoice
+
+menu "MQTT broker"
+
+config RADAR_CARE_BROKER_HOSTNAME
+	string "MQTT broker hostname or IP address"
+	default "192.168.x.x"
+
+config RADAR_CARE_BROKER_PORT
+	int "MQTT broker TCP port"
+	default 1883
+	range 1 65535
+	help
+	  Plain MQTT is 1883; MQTT over TLS is typically 8883. Set this to 8883
+	  when RADAR_CARE_MQTT_TLS is enabled.
+
+config RADAR_CARE_MQTT_TLS
+	bool "Connect to the broker over TLS"
+	select MQTT_LIB_TLS
+	select NET_SOCKETS_SOCKOPT_TLS
+	select TLS_CREDENTIALS
+	help
+	  Use a TLS-secured MQTT connection. Enable this together with the crypto
+	  backend settings in overlay-tls.conf (mbed TLS / nRF Security), and put
+	  the broker's CA certificate in src/certs/ca_cert.h (see the README).
+	  Remember to set RADAR_CARE_BROKER_PORT to the TLS port (usually 8883).
+
+if RADAR_CARE_MQTT_TLS
+
+config RADAR_CARE_MQTT_TLS_SEC_TAG
+	int "TLS security tag for the broker CA certificate"
+	default 201
+	help
+	  Arbitrary, application-chosen identifier under which the CA certificate
+	  is registered in the TLS credential store.
+
+config RADAR_CARE_MQTT_TLS_HOSTNAME
+	string "Expected TLS hostname (SNI / certificate name check)"
+	default ""
+	help
+	  Hostname checked against the broker certificate's CN/SAN and sent as
+	  SNI. Leave empty to reuse RADAR_CARE_BROKER_HOSTNAME. Must match a name
+	  in the server certificate, otherwise peer verification fails.
+
+config RADAR_CARE_MQTT_TLS_PEER_VERIFY
+	int "TLS peer verification level"
+	default 2
+	range 0 2
+	help
+	  0 = none, 1 = optional, 2 = required. Use 2 in production.
+
+endif # RADAR_CARE_MQTT_TLS
+
+config RADAR_CARE_MQTT_USERNAME
+	string "MQTT username (empty to disable auth)"
+	default ""
+	help
+	  Username sent in the MQTT CONNECT for broker authentication. Leave
+	  empty for anonymous brokers.
+
+config RADAR_CARE_MQTT_PASSWORD
+	string "MQTT password"
+	default ""
+	help
+	  Password paired with RADAR_CARE_MQTT_USERNAME. Prefer provisioning this
+	  out of band rather than committing it to prj.conf.
+
+endmenu
+
+menu "Telemetry"
+
+config RADAR_CARE_PRESENCE_PERIOD_MS
+	int "Presence publish period (ms)"
+	default 1000
+	range 100 60000
+
+config RADAR_CARE_BREATHING_PERIOD_MS
+	int "Breathing publish period (ms)"
+	default 2000
+	range 200 60000
+
+config RADAR_CARE_STATUS_PERIOD_S
+	int "Status/heartbeat publish period (s)"
+	default 15
+	range 1 3600
+
+config RADAR_CARE_WAVEFORM_STREAM
+	bool "Stream a downsampled breathing waveform"
+	default y
+
+endmenu
+
+menu "Fall detection"
+
+config RADAR_CARE_FALL_ENABLE
+	bool "Enable fall detection"
+	default y
+
+config RADAR_CARE_FALL_SETTLE_MS
+	int "Post-impact stillness window before confirming a fall (ms)"
+	depends on RADAR_CARE_FALL_ENABLE
+	default 4000
+	range 500 30000
+
+endmenu
+
+endmenu

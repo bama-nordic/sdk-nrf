@@ -1,0 +1,36 @@
+# Copyright (c) 2026 Nordic Semiconductor ASA
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+#
+# Senior-care dashboard stack: MQTT broker + FastAPI ingestion/dashboard.
+# Bring up with:  docker compose up --build
+# Then open the dashboard at http://localhost:8000
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: care-mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"   # MQTT
+      - "9001:9001"   # MQTT over WebSocket (optional)
+    volumes:
+      - ./broker/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  app:
+    build: ./app
+    container_name: care-app
+    restart: unless-stopped
+    depends_on:
+      - mosquitto
+    environment:
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      MQTT_TOPIC: "care/#"
+    ports:
+      - "8000:8000"   # dashboard + REST + WebSocket
+    volumes:
+      - ./web:/app/web:ro
+      - care-data:/data
+
+volumes:
+  care-data:

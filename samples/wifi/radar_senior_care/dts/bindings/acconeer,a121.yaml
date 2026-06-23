@@ -1,0 +1,29 @@
+# Copyright (c) 2026 Nordic Semiconductor ASA
+# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+
+description: |
+  Acconeer A121 60 GHz pulsed-coherent radar sensor.
+
+  The sensor is driven by the Acconeer RSS library through the application's
+  Zephyr HAL port, which obtains the SPI bus and the ENABLE / INTERRUPT GPIOs
+  from this node. There is no in-tree Zephyr driver; this binding only describes
+  the connection so the HAL can use the devicetree macros.
+
+compatible: "acconeer,a121"
+
+include: spi-device.yaml
+
+properties:
+  enable-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Sensor ENABLE line (active high). Driven high to power up the sensor,
+      low to disable it.
+
+  interrupt-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Sensor INTERRUPT/READY line (active high). The HAL waits on a rising
+      edge of this signal to know a measurement is ready.

@@ -1,0 +1,32 @@
+/*
+ * Copyright (c) 2026 Nordic Semiconductor ASA
+ *
+ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
+ *
+ * Acconeer A121 wiring for the nRF54LM20 DK.
+ *
+ * The nRF7002 EB-II Wi-Fi shield already consumes nordic_expansion_spi (spi22)
+ * and the expansion header, so the A121 is placed on the high-speed spi00
+ * instance (its on-board flash is disabled by default, freeing the bus).
+ *
+ * NOTE: these are DEFAULT pin assignments (decision D2). Verify SCLK/MOSI/MISO
+ * (via spi00 pinctrl), CS, ENABLE and INTERRUPT against the actual DK header
+ * pinout and the A121 EVK adapter before bring-up. The pinctrl groups
+ * spi00_default/spi00_sleep come from the board definition.
+ */
+
+&spi00 {
+	status = "okay";
+	/* A121 chip-select (reuses the spi00 CS pin from the board definition). */
+	cs-gpios = <&gpio2 5 GPIO_ACTIVE_LOW>;
+
+	a121: a121@0 {
+		compatible = "acconeer,a121";
+		reg = <0>;
+		/* A121 supports up to ~50 MHz; start conservatively. */
+		spi-max-frequency = <32000000>;
+
+		enable-gpios = <&gpio1 11 GPIO_ACTIVE_HIGH>;
+		interrupt-gpios = <&gpio1 12 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+	};
+};

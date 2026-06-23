@@ -1,0 +1,6 @@
+# Generated TLS material and credentials — never commit these.
+certs/
+passwd
+*.key
+*.crt
+*.srl
