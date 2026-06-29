@@ -31,13 +31,14 @@ config ARP_MQTT_BROKER_PREFER_IPV6
 
 config ARP_MQTT_SUB_TOPIC
 	string "MQTT subscribe topic filter"
-	default "nrf/sub/#"
+	default "actuator"
 	help
-	  MQTT topic filter for incoming messages (nrf/sub/* uses # wildcard).
+	  MQTT topic filter for incoming messages (uses the # wildcard, e.g.
+	  actuator).
 
 config ARP_MQTT_PUB_TOPIC_PREFIX
 	string "MQTT publish topic prefix"
-	default "nrf/pub/"
+	default ""
 	help
 	  Shell mqtt_pub <topic> publishes to <prefix><topic>.
 

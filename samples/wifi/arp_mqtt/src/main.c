@@ -39,7 +39,7 @@ LOG_MODULE_REGISTER(arp_mqtt, CONFIG_LOG_DEFAULT_LEVEL);
 
 #if defined(CONFIG_ARP_MQTT_PERIODIC_PUB)
 /* Periodic RTT report: ping the broker N times and publish the delays. */
-#define RTT_TOPIC          "nrf/rtt"
+#define RTT_TOPIC          "sensor"
 #define RTT_PING_COUNT     3
 #define RTT_PING_INTERVAL  K_MSEC(1000)
 #define RTT_PING_TIMEOUT   K_MSEC(1000)
@@ -82,6 +82,12 @@ static struct net_icmp_ctx ping_icmp_ctx;
 static K_SEM_DEFINE(ping_reply_sem, 0, 1);
 static uint16_t ping_identifier;
 static uint16_t ping_active_sequence;
+
+/* Released by main() once network bring-up has started. Keeps the periodic
+ * publisher idle during the startup delay (e.g. random_sleep()) instead of
+ * spinning and logging "MQTT not connected" before main() has run.
+ */
+static K_SEM_DEFINE(app_ready, 0, 1);
 #endif /* CONFIG_ARP_MQTT_PERIODIC_PUB */
 
 static int mqtt_client_id_set(void)
@@ -558,28 +564,72 @@ static int try_mqtt_connect(struct mqtt_client *client)
 	return -ETIMEDOUT;
 }
 
+/* Device MAC as "aa:bb:cc:dd:ee:ff" (lower-case) + NUL. */
+static char mac_str[18];
+
+static const char *mac_str_get(void)
+{
+	struct net_if *iface;
+	struct net_linkaddr *ll;
+
+	if (mac_str[0] != '\0') {
+		return mac_str;
+	}
+
+	iface = net_if_get_first_wifi();
+	if (iface == NULL) {
+		iface = net_if_get_default();
+	}
+
+	ll = (iface != NULL) ? net_if_get_link_addr(iface) : NULL;
+
+	if (ll != NULL && ll->len >= 6U) {
+		const uint8_t *m = ll->addr;
+
+		/* Cache only once a real MAC is available. */
+		(void)snprintk(mac_str, sizeof(mac_str),
+			       "%02x:%02x:%02x:%02x:%02x:%02x",
+			       m[0], m[1], m[2], m[3], m[4], m[5]);
+		return mac_str;
+	}
+
+	return "00:00:00:00:00:00";
+}
+
 static int mqtt_publish_payload(struct mqtt_client *client, const char *topic,
 				const char *payload)
 {
 	static uint16_t message_id;
+	/* "<mac> <payload>"; serialized by mqtt_lock, so a static buffer keeps
+	 * it off the (small) caller stacks even for a full-size payload.
+	 */
+	static char pub_buf[MQTT_BUFFER_SIZE + 16];
+	size_t payload_len;
+	int written;
 	int ret;
-	size_t payload_len = strlen(payload);
+
+	k_mutex_lock(&mqtt_lock, K_FOREVER);
+
+	written = snprintk(pub_buf, sizeof(pub_buf), "%s %s", mac_str_get(), payload);
+	payload_len = (written > 0 && (size_t)written < sizeof(pub_buf))
+			      ? (size_t)written
+			      : (sizeof(pub_buf) - 1U);
 
 	struct mqtt_publish_param param = {
 		.message.topic.topic.utf8 = (uint8_t *)topic,
 		.message.topic.topic.size = strlen(topic),
 		.message.topic.qos = MQTT_QOS_0_AT_MOST_ONCE,
-		.message.payload.data = (uint8_t *)payload,
+		.message.payload.data = (uint8_t *)pub_buf,
 		.message.payload.len = payload_len,
 		.message_id = message_id++,
 		.dup_flag = 0U,
 		.retain_flag = 0U,
 	};
 
-	k_mutex_lock(&mqtt_lock, K_FOREVER);
 	ret = mqtt_publish(client, &param);
 	if (ret == 0) {
 		(void)mqtt_live(client);
+		LOG_INF("MQTT TX topic=%s payload=%s", topic, pub_buf);
 	}
 	k_mutex_unlock(&mqtt_lock);
 
@@ -692,6 +742,11 @@ static void rtt_report_thread(void)
 {
 	char payload[RTT_PAYLOAD_SIZE];
 
+	/* Block until main() has started network bring-up, so this thread does
+	 * not run during the pre-main startup delay.
+	 */
+	k_sem_take(&app_ready, K_FOREVER);
+
 	for (;;) {
 		k_sleep(K_SECONDS(CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS));
 
@@ -706,9 +761,10 @@ static void rtt_report_thread(void)
 
 		if (ret != 0) {
 			LOG_WRN("RTT publish to %s failed: %d", RTT_TOPIC, ret);
-		} else {
-			LOG_INF("Published RTT to %s: %s", RTT_TOPIC, payload);
 		}
+		/* The actual transmitted payload (with MAC) is logged by
+		 * mqtt_publish_payload() as "MQTT TX ...".
+		 */
 	}
 }
 
@@ -800,9 +856,21 @@ static int wifi_set_listen_interval(void)
 }
 #endif /* CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL */
 
+void random_sleep(void)
+{
+    /* Random value between 1 and 50 seconds */
+    uint32_t sleep_sec = (sys_rand32_get() % 50) + 1;
+
+    printk("Sleeping for %u seconds...\n", sleep_sec);
+
+    k_sleep(K_SECONDS(sleep_sec));
+}
+
 int main(void)
 {
 	int err;
+
+	random_sleep();
 
 	LOG_INF("ARP MQTT (Wi-Fi) client starting");
 
@@ -835,6 +903,11 @@ int main(void)
 	}
 
 	wait_for_network();
+
+#if defined(CONFIG_ARP_MQTT_PERIODIC_PUB)
+	/* Network is up; allow the periodic publisher to start. */
+	k_sem_give(&app_ready);
+#endif
 
 	for (;;) {
 		err = try_mqtt_connect(&client_ctx);

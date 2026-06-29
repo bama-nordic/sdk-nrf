@@ -8,11 +8,11 @@ This sample demonstrates end-to-end connectivity from an nRF7002-based board to 
 
 1. **Wi-Fi** — Static credentials are compiled in; the Connection Manager brings the interface up. IPv4 uses DHCP; IPv6 uses Router Advertisements (SLAAC) when the access point advertises it.
 2. **MQTT** — A non-TLS MQTT 3.1.1 client connects to the configured broker (IPv4, IPv6, or DNS hostname), subscribes to a topic filter, and maintains the session with automatic reconnect.
-3. **Shell** — The `mqtt_pub` command publishes a user-supplied payload to a topic under `nrf/pub/`.
-4. **Periodic RTT report** — A background thread periodically pings the broker (ICMP echo) and publishes the measured round-trip delays to the `nrf/rtt` topic.
+3. **Shell** — The `mqtt_pub` command publishes a user-supplied payload to a configurable topic (empty prefix by default, so the topic is the shell argument as-is).
+4. **Periodic RTT report** — A background thread periodically pings the broker (ICMP echo) and publishes the measured round-trip delays to the `sensor` topic.
 5. **Wi-Fi power save (optional)** — When enabled, the sample programs a configurable listen interval and switches the station to listen-interval based power-save wakeup before associating. Disabled by default.
 
-Incoming messages on the subscribe filter are logged with topic and payload. Publish operations from the shell are silent on success (no log or shell output).
+Incoming messages on the subscribe filter are logged with topic and payload. Every outgoing publish has the device MAC address prepended to the payload (for example `aa:bb:cc:dd:ee:ff <payload>`) and is logged as `MQTT TX topic=<topic> payload=<...>`.
 
 ## Supported hardware
 
@@ -40,23 +40,23 @@ The broker and the DK must be on the same IP network (or routable). The sample d
 │  (this app) │                              │              │  IPv4 / IPv6   │ (Mosquitto) │
 └─────────────┘                              └──────────────┘                └─────────────┘
        │                                                                            ▲
-       │  Subscribe: nrf/sub/#                                                      │
-       │  Publish (shell): nrf/pub/<topic>                                          │
-       │  Publish (periodic RTT): nrf/rtt  e.g. "5ms,102ms,4ms"                      │
+       │  Subscribe: actuator                                                      │
+       │  Publish (shell): <topic>  (payload has device MAC prepended)                                          │
+       │  Publish (periodic RTT): sensor  e.g. "aa:bb:cc:dd:ee:ff 5ms,102ms,4ms"                      │
        └────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Startup sequence
 
-1. `main()` brings all interfaces up through the Connection Manager.
+1. `main()` first waits a random 1–50 s (`random_sleep()`, to stagger multiple devices), then brings all interfaces up through the Connection Manager. Autonomous threads (the periodic RTT publisher) block on an `app_ready` semaphore until this point, so they stay idle during the delay instead of logging "MQTT not connected".
 2. If `CONFIG_ARP_MQTT_WIFI_LISTEN_INTERVAL=y`, `wifi_set_listen_interval()` programs the Wi-Fi power-save listen interval and switches the wakeup mode to listen interval **before** the connection is initiated (see [Wi-Fi power-save listen interval](#wi-fi-power-save-listen-interval)).
 3. `main()` requests the connection, and `wait_for_network()` blocks until L4 connectivity is available (from `net_sample_common`).
 4. `try_mqtt_connect()` resolves the broker, waits until the broker's IP family has L4 connectivity (see note below), opens a TCP socket, sends `CONNECT`, and waits for `CONNACK`.
 
 > Note: with dual-stack enabled, `NET_EVENT_L4_CONNECTED` fires as soon as *either* family is up — IPv6 (link-local/RA) is usually ready well before IPv4 DHCP completes. Connecting to an IPv4 broker in that window fails with `-EINVAL` because no IPv4 source address exists yet. The sample tracks the per-family conn_mgr events (`NET_EVENT_L4_IPV4_CONNECTED` / `NET_EVENT_L4_IPV6_CONNECTED`) and only attempts the broker connect once the broker's family is actually up, avoiding those transient failures.
-5. On success, the client subscribes to the configured topic filter (default `nrf/sub/#`).
+5. On success, the client subscribes to the configured topic filter (default `actuator`).
 6. The main loop calls `mqtt_process()` to handle keepalive, incoming publishes, and disconnects. On failure, the client disconnects, waits, and reconnects.
-7. A separate background thread (`rtt_report_thread`) wakes every `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` and, while the MQTT session is up, pings the broker and publishes the result to `nrf/rtt` (see [Periodic RTT report](#periodic-rtt-report)).
+7. A separate background thread (`rtt_report_thread`) wakes every `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` and, while the MQTT session is up, pings the broker and publishes the result to `sensor` (see [Periodic RTT report](#periodic-rtt-report)).
 
 ### IPv4 and IPv6
 
@@ -76,17 +76,19 @@ Broker resolution in `broker_addr_setup()`:
 The connect log shows the resolved address, for example:
 
 ```text
-[inf] arp_mqtt: MQTT session up (broker [192.168.29.133]:1883, subscribe nrf/sub/#)
-[inf] arp_mqtt: MQTT session up (broker [2001:db8::1]:1883, subscribe nrf/sub/#)
+[inf] arp_mqtt: MQTT session up (broker [192.168.29.133]:1883, subscribe actuator)
+[inf] arp_mqtt: MQTT session up (broker [2001:db8::1]:1883, subscribe actuator)
 ```
 
 ### MQTT topics
 
-| Direction | Topic pattern | Default | Notes |
-|-----------|---------------|---------|--------|
-| Subscribe | `nrf/sub/#` | `CONFIG_ARP_MQTT_SUB_TOPIC` | Multi-level wildcard; receives all topics under `nrf/sub/` |
-| Publish | `nrf/pub/<topic>` | `CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX` + shell argument | `<topic>` must not contain `/` |
-| Publish | `nrf/rtt` | Fixed (literal) | Periodic broker round-trip delays, for example `5ms,102ms,4ms` |
+| Direction | Topic | Default | Notes |
+|-----------|-------|---------|--------|
+| Subscribe | `actuator` | `CONFIG_ARP_MQTT_SUB_TOPIC` | Exact topic by default; append `/#` for a multi-level wildcard |
+| Publish | `<topic>` | `CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX` (empty) + shell argument | `<topic>` must not contain `/` |
+| Publish | `sensor` | Fixed (`RTT_TOPIC`) | Periodic broker round-trip delays |
+
+Every published payload is prefixed with the device MAC address, for example `aa:bb:cc:dd:ee:ff 5ms,102ms,4ms`.
 
 MQTT wildcards use `#` (multi-level) and `+` (single-level), not `*`.
 
@@ -102,20 +104,20 @@ Example:
 uart:~$ mqtt_pub test 102.75
 ```
 
-This publishes the string `102.75` to topic `nrf/pub/test`. The command returns silently on success; errors are printed to the shell.
+With the default empty prefix this publishes to topic `test`, and the payload is sent with the device MAC prepended, e.g. `aa:bb:cc:dd:ee:ff 102.75`. The DK logs it as `MQTT TX topic=test payload=aa:bb:cc:dd:ee:ff 102.75`; errors are printed to the shell.
 
 Maximum payload length is `CONFIG_ARP_MQTT_APP_BUFFER_SIZE - 1` (default 1023 bytes).
 
 ### Periodic RTT report
 
-A dedicated background thread (`rtt_report_thread`) periodically measures the network round-trip time to the MQTT broker and publishes the result to the `nrf/rtt` topic. This autonomous publishing is controlled by `CONFIG_ARP_MQTT_PERIODIC_PUB` (**enabled by default**); set it to `n` to compile out the thread entirely, leaving only the shell `mqtt_pub` command for publishing.
+A dedicated background thread (`rtt_report_thread`) periodically measures the network round-trip time to the MQTT broker and publishes the result to the `sensor` topic. This autonomous publishing is controlled by `CONFIG_ARP_MQTT_PERIODIC_PUB` (**enabled by default**); set it to `n` to compile out the thread entirely, leaving only the shell `mqtt_pub` command for publishing.
 
 Each cycle:
 
 1. The thread sleeps for `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` (default **60**).
 2. If the MQTT session is **not** connected, the cycle is skipped and a warning is logged.
 3. Otherwise it sends **3 ICMP echo requests** (pings) to the resolved broker address (IPv4 or IPv6), one per second, each with a 1-second timeout.
-4. The per-ping round-trip delays are concatenated into a comma-separated string and published to `nrf/rtt` with QoS 0.
+4. The per-ping round-trip delays are concatenated into a comma-separated string and published to `sensor` with QoS 0 (with the device MAC prepended, as for all publishes).
 
 Payload format:
 
@@ -123,10 +125,10 @@ Payload format:
 - A ping that fails or times out is reported as `Nan` in its position, for example `5ms,Nan,4ms`.
 - If ICMP cannot be initialized at all, every entry is `Nan` (`Nan,Nan,Nan`).
 
-On the DK UART, each published report is logged:
+On the DK UART, each published report is logged by the publish path:
 
 ```text
-[inf] arp_mqtt: Published RTT to nrf/rtt: 5ms,102ms,4ms
+[inf] arp_mqtt: MQTT TX topic=sensor payload=aa:bb:cc:dd:ee:ff 5ms,102ms,4ms
 ```
 
 > Note: round-trip times below 1 ms are reported as `0ms` because the delay is measured at millisecond resolution.
@@ -230,8 +232,8 @@ To disable IPv6 and use IPv4 only, set `CONFIG_NET_IPV6=n` in `prj.conf`.
 Defaults are defined in `Kconfig`; override in `prj.conf` if needed:
 
 ```conf
-CONFIG_ARP_MQTT_SUB_TOPIC="nrf/sub/#"
-CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX="nrf/pub/"
+CONFIG_ARP_MQTT_SUB_TOPIC="actuator"
+CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX=""
 CONFIG_ARP_MQTT_APP_BUFFER_SIZE=1024
 CONFIG_ARP_MQTT_PERIODIC_PUB=y
 CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS=60
@@ -246,7 +248,7 @@ Each device derives its MQTT client ID at connect time as `nrf_` plus the four l
 | `CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX` | Prefix for shell publish topics |
 | `CONFIG_ARP_MQTT_APP_BUFFER_SIZE` | MQTT RX/TX and payload buffer size (bytes) |
 | `CONFIG_ARP_MQTT_PERIODIC_PUB` | Enable the autonomous periodic RTT publish thread (default **y**) |
-| `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` | Interval, in seconds, between periodic broker RTT reports published to `nrf/rtt` (default 60, range 1–86400; requires `CONFIG_ARP_MQTT_PERIODIC_PUB`) |
+| `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` | Interval, in seconds, between periodic broker RTT reports published to `sensor` (default 60, range 1–86400; requires `CONFIG_ARP_MQTT_PERIODIC_PUB`) |
 
 #### Changing the subscribe topic (`CONFIG_ARP_MQTT_SUB_TOPIC`)
 
@@ -343,8 +345,8 @@ Connect to the serial console (for example `minicom`, `picocom`, or the nRF Conn
 
 ```text
 [inf] arp_mqtt: ARP MQTT (Wi-Fi) client starting
-[inf] arp_mqtt: MQTT session up (broker [192.168.x.x]:1883, subscribe nrf/sub/#)
-[inf] arp_mqtt: MQTT subscribed to nrf/sub/#
+[inf] arp_mqtt: MQTT session up (broker [192.168.x.x]:1883, subscribe actuator)
+[inf] arp_mqtt: MQTT subscribed to actuator
 ```
 
 ## Testing with Mosquitto
@@ -354,42 +356,42 @@ On a host on the same network as the broker:
 **Subscribe to device publishes (IPv4):**
 
 ```bash
-mosquitto_sub -h <broker_ipv4> -p 1883 -t 'nrf/pub/#' -v
+mosquitto_sub -h <broker_ipv4> -p 1883 -t '#' -v
 ```
 
 **Subscribe using IPv6:**
 
 ```bash
-mosquitto_sub -h <broker_ipv6> -p 1883 -t 'nrf/pub/#' -v
+mosquitto_sub -h <broker_ipv6> -p 1883 -t '#' -v
 ```
 
 **Watch the periodic RTT reports:**
 
 ```bash
-mosquitto_sub -h <broker_ip> -p 1883 -t 'nrf/rtt' -v
+mosquitto_sub -h <broker_ip> -p 1883 -t 'sensor' -v
 ```
 
 Approximately every `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` (default 60), a line appears with the broker ping delays:
 
 ```text
-nrf/rtt 5ms,102ms,4ms
-nrf/rtt 6ms,Nan,5ms
+sensor aa:bb:cc:dd:ee:ff 5ms,102ms,4ms
+sensor aa:bb:cc:dd:ee:ff 6ms,Nan,5ms
 ```
 
 **Publish to the device from another MQTT client:**
 
-When another host publishes to a topic under `nrf/sub/`, the nRF7002 DK prints the topic and payload on the serial console. Examples:
+When another host publishes to the subscribed topic `actuator`, the nRF7002 DK prints the topic and payload on the serial console. Examples:
 
 ```bash
-mosquitto_pub -h <broker_ip> -p 1883 -t 'nrf/sub/Delay' -m '1122.90'
-mosquitto_pub -h <broker_ip> -p 1883 -t 'nrf/sub/RTT' -m '145ms'
+mosquitto_pub -h <broker_ip> -p 1883 -t 'actuator' -m '1122.90'
+mosquitto_pub -h <broker_ip> -p 1883 -t 'actuator' -m '145ms'
 ```
 
 On the DK UART you will see log lines like:
 
 ```text
-[00:02:47.010,192] <inf> arp_mqtt: MQTT RX topic=nrf/sub/Delay payload=1122.90
-[00:03:07.782,073] <inf> arp_mqtt: MQTT RX topic=nrf/sub/RTT payload=145ms
+[00:02:47.010,192] <inf> arp_mqtt: MQTT RX topic=actuator payload=1122.90
+[00:03:07.782,073] <inf> arp_mqtt: MQTT RX topic=actuator payload=145ms
 ```
 
 The timestamp prefix comes from the Zephyr logging subsystem; the message format is `MQTT RX topic=<topic> payload=<payload>`.
@@ -400,10 +402,10 @@ The timestamp prefix comes from the Zephyr logging subsystem; the message format
 uart:~$ mqtt_pub test 102.75
 ```
 
-The host running `mosquitto_sub` should show:
+The host running `mosquitto_sub` should show (note the MAC-prefixed payload):
 
 ```text
-nrf/pub/test 102.75
+test aa:bb:cc:dd:ee:ff 102.75
 ```
 
 ### Mosquitto dual-stack notes
@@ -444,10 +446,10 @@ Save and exit, then rebuild.
 | `Broker connect failed` | Broker IP/port; ping broker from another host; correct address family (v4 vs v6) |
 | DNS resolves wrong family | Set literal IP in `CONFIG_ARP_MQTT_BROKER_HOSTNAME` or use `CONFIG_ARP_MQTT_BROKER_PREFER_IPV6` |
 | `mqtt_pub`: `MQTT not connected` | Wait for CONNACK log; broker must accept the client ID |
-| Subscribe works, publish does not | Topic spelling; `mosquitto_sub` on `nrf/pub/#` |
+| Subscribe works, publish does not | Topic spelling; `mosquitto_sub` on `#` (publishes have no prefix) |
 | Payload truncated | Increase `CONFIG_ARP_MQTT_APP_BUFFER_SIZE` |
-| `nrf/rtt` shows `Nan` | Broker/host blocks ICMP echo; check that the broker host replies to `ping`; verify the broker is reachable on the resolved address family |
-| No `nrf/rtt` messages | MQTT not connected when the timer fires (look for "RTT report skipped" warning); confirm `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` |
+| `sensor` shows `Nan` | Broker/host blocks ICMP echo; check that the broker host replies to `ping`; verify the broker is reachable on the resolved address family |
+| No `sensor` messages | MQTT not connected when the timer fires (look for "RTT report skipped" warning); confirm `CONFIG_ARP_MQTT_RTT_PERIOD_SECONDS` |
 
 Enable more logging if needed:
 
