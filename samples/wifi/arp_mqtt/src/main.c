@@ -34,7 +34,9 @@
 LOG_MODULE_REGISTER(arp_mqtt, CONFIG_LOG_DEFAULT_LEVEL);
 
 #define MQTT_BUFFER_SIZE CONFIG_ARP_MQTT_APP_BUFFER_SIZE
+#if defined(CONFIG_ARP_MQTT_ENABLE_SUB)
 #define MQTT_SUB_TOPIC   CONFIG_ARP_MQTT_SUB_TOPIC
+#endif
 #define MQTT_PUB_PREFIX  CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX
 
 #if defined(CONFIG_ARP_MQTT_PERIODIC_PUB)
@@ -186,36 +188,53 @@ static void clear_fds(void)
 	nfds = 0;
 }
 
+#if defined(CONFIG_ARP_MQTT_ENABLE_SUB)
 static int handle_incoming_publish(struct mqtt_client *client,
 				   const struct mqtt_publish_param *pub)
 {
+	/* Called only from the single mqtt_process() context (main thread), so
+	 * these scratch buffers are static to keep the main stack small.
+	 */
+	static char topic[128];
+	static char payload[MQTT_BUFFER_SIZE];
 	size_t payload_len = pub->message.payload.len;
-	size_t received = 0;
-	char topic[128];
-	char payload[MQTT_BUFFER_SIZE];
 	size_t topic_len = MIN(pub->message.topic.topic.size, sizeof(topic) - 1);
+	size_t remaining = payload_len;
+	size_t stored = 0;
 
 	(void)memcpy(topic, pub->message.topic.topic.utf8, topic_len);
 	topic[topic_len] = '\0';
 
-	if (payload_len >= sizeof(payload)) {
-		LOG_WRN("MQTT RX topic=%s payload too large (%zu bytes)", topic, payload_len);
-		return -ENOMEM;
-	}
-
-	while (received < payload_len) {
-		int ret = mqtt_read_publish_payload_blocking(client,
-							   &payload[received],
-							   payload_len - received);
+	/* The payload must always be drained from the socket, even when it does
+	 * not fit our buffer. Any bytes left unread keep remaining_payload > 0
+	 * in the MQTT client, so the next mqtt_input() returns -EBUSY and the
+	 * connection is dropped. Store what fits and discard the rest.
+	 */
+	while (remaining > 0) {
+		uint8_t chunk[64];
+		size_t want = MIN(remaining, sizeof(chunk));
+		int ret = mqtt_read_publish_payload_blocking(client, chunk, want);
 
 		if (ret < 0) {
 			return ret;
 		}
 
-		received += ret;
+		if (stored < sizeof(payload) - 1) {
+			size_t copy = MIN((size_t)ret, sizeof(payload) - 1 - stored);
+
+			(void)memcpy(&payload[stored], chunk, copy);
+			stored += copy;
+		}
+
+		remaining -= ret;
 	}
 
-	payload[received] = '\0';
+	payload[stored] = '\0';
+
+	if (stored < payload_len) {
+		LOG_WRN("MQTT RX topic=%s payload truncated (%zu of %zu bytes)", topic, stored,
+			payload_len);
+	}
 	LOG_INF("MQTT RX topic=%s payload=%s", topic, payload);
 
 	if (pub->message.topic.qos == MQTT_QOS_1_AT_LEAST_ONCE) {
@@ -228,6 +247,42 @@ static int handle_incoming_publish(struct mqtt_client *client,
 
 	return 0;
 }
+#else /* CONFIG_ARP_MQTT_ENABLE_SUB */
+/* Publish-only build. We never subscribe and connect with a clean session, so
+ * the broker should not deliver anything. Still, an in-flight or retained
+ * PUBLISH could arrive; drain and discard it so remaining_payload returns to 0
+ * and the connection is not dropped with -EBUSY. The message is not acted on.
+ */
+static int handle_incoming_publish(struct mqtt_client *client,
+				   const struct mqtt_publish_param *pub)
+{
+	size_t remaining = pub->message.payload.len;
+
+	while (remaining > 0) {
+		uint8_t chunk[64];
+		size_t want = MIN(remaining, sizeof(chunk));
+		int ret = mqtt_read_publish_payload_blocking(client, chunk, want);
+
+		if (ret < 0) {
+			return ret;
+		}
+
+		remaining -= ret;
+	}
+
+	LOG_DBG("Dropped unexpected MQTT publish (%zu bytes)", pub->message.payload.len);
+
+	if (pub->message.topic.qos == MQTT_QOS_1_AT_LEAST_ONCE) {
+		struct mqtt_puback_param puback = {
+			.message_id = pub->message_id,
+		};
+
+		(void)mqtt_publish_qos1_ack(client, &puback);
+	}
+
+	return 0;
+}
+#endif /* CONFIG_ARP_MQTT_ENABLE_SUB */
 
 static void mqtt_evt_handler(struct mqtt_client *const client, const struct mqtt_evt *evt)
 {
@@ -245,13 +300,19 @@ static void mqtt_evt_handler(struct mqtt_client *const client, const struct mqtt
 			char addr[NET_IPV6_ADDR_LEN];
 
 			broker_addr_str(addr, sizeof(addr));
+#if defined(CONFIG_ARP_MQTT_ENABLE_SUB)
 			LOG_INF("MQTT session up (broker [%s]:%d, subscribe %s)", addr,
 				CONFIG_ARP_MQTT_BROKER_PORT, MQTT_SUB_TOPIC);
+#else
+			LOG_INF("MQTT session up (broker [%s]:%d, publish-only)", addr,
+				CONFIG_ARP_MQTT_BROKER_PORT);
+#endif
 		}
 		break;
 	case MQTT_EVT_PUBLISH:
 		(void)handle_incoming_publish(client, &evt->param.publish);
 		break;
+#if defined(CONFIG_ARP_MQTT_ENABLE_SUB)
 	case MQTT_EVT_SUBACK:
 		if (evt->result != 0) {
 			LOG_ERR("MQTT subscribe failed: %d", evt->result);
@@ -259,6 +320,7 @@ static void mqtt_evt_handler(struct mqtt_client *const client, const struct mqtt
 			LOG_INF("MQTT subscribed to %s", MQTT_SUB_TOPIC);
 		}
 		break;
+#endif /* CONFIG_ARP_MQTT_ENABLE_SUB */
 	case MQTT_EVT_DISCONNECT:
 		LOG_INF("MQTT disconnected (%d)", evt->result);
 		mqtt_got_connack = false;
@@ -364,6 +426,15 @@ static void client_init(struct mqtt_client *client)
 	client->tx_buf = tx_buffer;
 	client->tx_buf_size = sizeof(tx_buffer);
 
+#if !defined(CONFIG_ARP_MQTT_ENABLE_SUB)
+	/* Publish-only build: start a clean session so the broker discards any
+	 * subscription left over from a previous (persistent) session under the
+	 * same client ID. This guarantees the broker delivers nothing to this
+	 * device, i.e. it does not respond to any publisher.
+	 */
+	client->clean_session = 1U;
+#endif
+
 	client->transport.type = MQTT_TRANSPORT_NON_SECURE;
 }
 
@@ -419,6 +490,7 @@ static int mqtt_process(struct mqtt_client *client, int timeout_ms)
 	return 0;
 }
 
+#if defined(CONFIG_ARP_MQTT_ENABLE_SUB)
 static int mqtt_subscribe_topics(struct mqtt_client *client)
 {
 	struct mqtt_topic topic = {
@@ -436,6 +508,7 @@ static int mqtt_subscribe_topics(struct mqtt_client *client)
 
 	return mqtt_subscribe(client, &sub_list);
 }
+#endif /* CONFIG_ARP_MQTT_ENABLE_SUB */
 
 static void l4_family_event_handler(struct net_mgmt_event_callback *cb, uint64_t event,
 				    struct net_if *iface)
@@ -540,6 +613,7 @@ static int try_mqtt_connect(struct mqtt_client *client)
 			continue;
 		}
 
+#if defined(CONFIG_ARP_MQTT_ENABLE_SUB)
 		ret = mqtt_subscribe_topics(client);
 		if (ret != 0) {
 			LOG_ERR("mqtt_subscribe failed: %d", ret);
@@ -557,6 +631,7 @@ static int try_mqtt_connect(struct mqtt_client *client)
 			k_sleep(K_SECONDS(2));
 			continue;
 		}
+#endif /* CONFIG_ARP_MQTT_ENABLE_SUB */
 
 		return 0;
 	}

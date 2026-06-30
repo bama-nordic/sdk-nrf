@@ -84,7 +84,7 @@ The connect log shows the resolved address, for example:
 
 | Direction | Topic | Default | Notes |
 |-----------|-------|---------|--------|
-| Subscribe | `actuator` | `CONFIG_ARP_MQTT_SUB_TOPIC` | Exact topic by default; append `/#` for a multi-level wildcard |
+| Subscribe | `actuator` | `CONFIG_ARP_MQTT_SUB_TOPIC` | Exact topic by default; append `/#` for a multi-level wildcard. Only present when `CONFIG_ARP_MQTT_ENABLE_SUB=y` (default) |
 | Publish | `<topic>` | `CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX` (empty) + shell argument | `<topic>` must not contain `/` |
 | Publish | `sensor` | Fixed (`RTT_TOPIC`) | Periodic broker round-trip delays |
 
@@ -111,6 +111,22 @@ Maximum payload length is `CONFIG_ARP_MQTT_APP_BUFFER_SIZE - 1` (default 1023 by
 ### Periodic RTT report
 
 A dedicated background thread (`rtt_report_thread`) periodically measures the network round-trip time to the MQTT broker and publishes the result to the `sensor` topic. This autonomous publishing is controlled by `CONFIG_ARP_MQTT_PERIODIC_PUB` (**enabled by default**); set it to `n` to compile out the thread entirely, leaving only the shell `mqtt_pub` command for publishing.
+
+### Publish-only build (disabling subscriptions)
+
+The subscribe/receive path is controlled by `CONFIG_ARP_MQTT_ENABLE_SUB` (**enabled by default**). Set it to `n` for a publish-only build:
+
+```conf
+CONFIG_ARP_MQTT_ENABLE_SUB=n
+```
+
+When disabled:
+
+- The sample never subscribes, and `CONFIG_ARP_MQTT_SUB_TOPIC` is unavailable. The session log reads `publish-only` instead of `subscribe <topic>`.
+- The client connects with a **clean session**, so the broker discards any subscription left over from a previous (persistent) session under the same client ID. As a result the broker delivers nothing to this device: it does not respond to any publisher.
+- Should an in-flight or retained message still arrive, its payload is drained from the socket and discarded (the device does not act on it), so the connection is not dropped.
+
+Publishing is unaffected: the shell `mqtt_pub` command and, if `CONFIG_ARP_MQTT_PERIODIC_PUB=y`, the periodic RTT thread keep working.
 
 Each cycle:
 
@@ -232,6 +248,7 @@ To disable IPv6 and use IPv4 only, set `CONFIG_NET_IPV6=n` in `prj.conf`.
 Defaults are defined in `Kconfig`; override in `prj.conf` if needed:
 
 ```conf
+CONFIG_ARP_MQTT_ENABLE_SUB=y
 CONFIG_ARP_MQTT_SUB_TOPIC="actuator"
 CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX=""
 CONFIG_ARP_MQTT_APP_BUFFER_SIZE=1024
@@ -244,7 +261,8 @@ Each device derives its MQTT client ID at connect time as `nrf_` plus the four l
 | Variable | Description |
 |----------|-------------|
 | `CONFIG_HW_ID_LIBRARY` / `CONFIG_HW_ID_LIBRARY_SOURCE_NET_MAC` | Required for MAC-based client ID (enabled in `prj.conf`) |
-| `CONFIG_ARP_MQTT_SUB_TOPIC` | Topic filter for subscriptions |
+| `CONFIG_ARP_MQTT_ENABLE_SUB` | Compile in the MQTT subscribe/receive path (default **y**); set to `n` for a publish-only build that does not respond to any publisher |
+| `CONFIG_ARP_MQTT_SUB_TOPIC` | Topic filter for subscriptions (only available when `CONFIG_ARP_MQTT_ENABLE_SUB=y`) |
 | `CONFIG_ARP_MQTT_PUB_TOPIC_PREFIX` | Prefix for shell publish topics |
 | `CONFIG_ARP_MQTT_APP_BUFFER_SIZE` | MQTT RX/TX and payload buffer size (bytes) |
 | `CONFIG_ARP_MQTT_PERIODIC_PUB` | Enable the autonomous periodic RTT publish thread (default **y**) |

@@ -29,8 +29,19 @@ config ARP_MQTT_BROKER_PREFER_IPV6
 	  When both A and AAAA DNS records exist, connect to the IPv6 address.
 	  Literal IPv4/IPv6 strings in ARP_MQTT_BROKER_HOSTNAME are always honored.
 
+config ARP_MQTT_ENABLE_SUB
+	bool "Subscribe to incoming MQTT topics"
+	default y
+	help
+	  Subscribe to CONFIG_ARP_MQTT_SUB_TOPIC after connecting and act on
+	  incoming messages. When disabled, the sample never subscribes and
+	  connects with a clean session, so the broker delivers nothing to
+	  this device: it does not respond to any publisher. This yields a
+	  publish-only build.
+
 config ARP_MQTT_SUB_TOPIC
 	string "MQTT subscribe topic filter"
+	depends on ARP_MQTT_ENABLE_SUB
 	default "actuator"
 	help
 	  MQTT topic filter for incoming messages (uses the # wildcard, e.g.
